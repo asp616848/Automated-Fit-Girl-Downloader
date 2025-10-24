@@ -57,25 +57,53 @@ async function downloadFiles(links, downloadPath) {
 
         try {
             console.log(`Navigating to: ${link}`);
-            await page.goto(link, { waitUntil: 'networkidle2' });
-
-            // Call the download function for the first time
-            console.log('Calling download for the first time...');
-            await page.evaluate(() => {
-                if (typeof download === 'function') {
-                    download();
+            
+            // Try to navigate with retries
+            let navigationSuccess = false;
+            let retries = 3;
+            
+            while (retries > 0 && !navigationSuccess) {
+                try {
+                    await page.goto(link, { waitUntil: 'networkidle2', timeout: 60000 });
+                    navigationSuccess = true;
+                } catch (navError) {
+                    retries--;
+                    console.log(`Navigation failed, retries left: ${retries}`);
+                    if (retries > 0) {
+                        await new Promise(resolve => setTimeout(resolve, 3000)); // Wait 3 seconds before retry
+                    } else {
+                        throw navError; // Throw error if all retries exhausted
+                    }
                 }
-            });
-
-            // Wait for the new tab or redirected page
-            const newPage = await newPagePromise;
-            if (newPage) {
-                console.log('New page opened, handling the download there...');
-                await newPage.waitForSelector('body'); // Make sure the new page has loaded
-                newPage.close()
             }
 
-            // Call the download function for the second time
+            // Call the download function for the first time
+            // console.log('Calling download for the first time...');
+            // await page.evaluate(() => {
+            //     if (typeof download === 'function') {
+            //         download();
+            //     }
+            // });
+
+            // Wait for the new tab or redirected page
+            const newPage = await Promise.race([
+                newPagePromise,
+                new Promise(resolve => setTimeout(() => resolve(null), 10000)) // 10 second timeout
+            ]);
+            
+            if (newPage) {
+                console.log('New page opened, handling the download there...');
+                try {
+                    await newPage.waitForSelector('body', { timeout: 5000 }); // Make sure the new page has loaded
+                    await newPage.close();
+                } catch (newPageError) {
+                    console.log('Error handling new page:', newPageError.message);
+                }
+            } else {
+                console.log('No new page opened (timeout or no redirect)');
+            }
+
+            // Call the download function 
             console.log('Calling download for the second time...');
             await page.evaluate(() => {
                 if (typeof download === 'function') {
@@ -89,14 +117,23 @@ async function downloadFiles(links, downloadPath) {
 
             // Wait for 90 seconds before the next download, or skip if a key is pressed
             console.log('Waiting for 90 seconds before the next download... (Press Enter to skip)');
-            await waitForOrSkip(1000 * 90); // Wait for 90 seconds or skip
+            await waitForOrSkip(1000 * 20); // Wait for 90 seconds or skip
             await page.close()
         } catch (error) {
-            console.error(`Error processing ${link}:`, error);
-            await page.close(); // Close the page even if there was an error
+            console.error(`Error processing ${link}:`, error.message);
+            console.log('Skipping this link and continuing with next...');
+            try {
+                await page.close(); // Close the page even if there was an error
+            } catch (closeError) {
+                console.error('Error closing page:', closeError.message);
+            }
+            // Continue to next iteration instead of failing
+            continue;
         }
     }
 
+    console.log('All links processed. Waiting 10 minutes before closing the browser...');
+    await new Promise(resolve => setTimeout(resolve, 10 * 60 * 1000));
     await browser.close();
     rl.close(); // Close the readline interface
 }
